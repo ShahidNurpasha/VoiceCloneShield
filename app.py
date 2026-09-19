@@ -13,7 +13,6 @@ import librosa
 import librosa.display
 import matplotlib.pyplot as plt
 import numpy as np
-import sounddevice as sd
 import streamlit as st
 import torch
 import torch.nn as nn
