@@ -3,6 +3,5 @@ torch
 numpy
 librosa
 matplotlib
-sounddevice
 imageio-ffmpeg
 scikit-learn
