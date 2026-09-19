@@ -746,263 +746,115 @@ def predict_audio(audio, sr):
     return "REAL", (1 - probability) * 100, mel
 
 # ============================================================
-# MICROPHONE STATE & BUFFER MANAGEMENT
+# BROWSER MICROPHONE INPUT
 # ============================================================
-audio_lock = threading.Lock()
-audio_buffer = np.zeros(44100 * 5, dtype=np.float32)
 
-mic_stream = None
-mic_running = False
-
-latest_rms = 0.0
-latest_result = "WAITING"
-latest_confidence = 0.0
-latest_mel = None
-last_prediction = 0.0
-
-MIC_DEVICE = 1
-MIC_SR = 44100
-
-def audio_callback(indata, frames, time_info, status):
-    global audio_buffer, latest_rms
-
-    if status:
-        print("Audio stream status:", status)
-
-    try:
-        new_audio = indata[:, 0].copy().astype(np.float32)
-        rms = float(np.sqrt(np.mean(new_audio ** 2)))
-
-        with audio_lock:
-            latest_rms = rms
-            audio_buffer = np.concatenate((audio_buffer, new_audio))
-            audio_buffer = audio_buffer[-44100 * 5:]
-
-    except Exception as e:
-        print("Audio callback exception:", e)
-
-def start_microphone():
-    global mic_stream, mic_running
-
-    if mic_running:
-        return True
-
-    try:
-        with audio_lock:
-            audio_buffer[:] = 0
-            global latest_rms, latest_result, latest_confidence, latest_mel, last_prediction
-            latest_rms = 0.0
-            latest_result = "WAITING"
-            latest_confidence = 0.0
-            latest_mel = None
-            last_prediction = 0.0
-
-        mic_stream = sd.InputStream(
-            device=MIC_DEVICE,
-            samplerate=MIC_SR,
-            channels=1,
-            dtype="float32",
-            blocksize=2048,
-            callback=audio_callback
-        )
-        mic_stream.start()
-        mic_running = True
-        return True
-
-    except Exception as e:
-        mic_stream = None
-        mic_running = False
-        st.error(f"Microphone initialization failed: {e}")
-        return False
-
-def stop_microphone():
-    global mic_stream, mic_running
-
-    if mic_stream is not None:
-        try:
-            mic_stream.stop()
-            mic_stream.close()
-        except Exception:
-            pass
-
-    mic_stream = None
-    mic_running = False
-
-# ============================================================
-# LIVE MONITOR CONTROL PANEL
-# ============================================================
 st.subheader("🎙️ Real-Time Voice Monitor")
-st.caption("Capture live vocal input from the acoustic sensor to analyze spectral signatures for synthetic characteristics.")
+st.caption("Record your voice using your browser microphone and analyze it for synthetic voice characteristics.")
 
-control_col1, control_col2, status_box = st.columns([1, 1, 1.6])
+audio_recording = st.audio_input("🎙️ Record your voice")
 
-with control_col1:
-    if st.button("▶ START LIVE DETECTION", use_container_width=True):
-        if start_microphone():
-            st.success("Microphone stream activated. Begin speaking.")
+if audio_recording is not None:
 
-with control_col2:
-    st.markdown('<div class="secondary-btn">', unsafe_allow_html=True)
-    if st.button("⏹ STOP MONITORING", use_container_width=True):
-        stop_microphone()
-        st.info("Microphone stream terminated.")
-    st.markdown('</div>', unsafe_allow_html=True)
+    try:
+        audio_bytes = audio_recording.getvalue()
 
-with status_box:
-    sensor_status = "Active Listening" if mic_running else "Standby Mode"
-    status_class = "online" if mic_running else "offline"
-    st.markdown(f"""
-    <div class="ui-card" style="padding: 12px 16px;">
-      <div style="display:flex; justify-content:space-between; align-items:center;">
-        <div>
-          <div class="ui-card-title">Acoustic Input Interface</div>
-          <div style="font-size: 13px; font-weight: 600; color: var(--text-heading);">Device #{MIC_DEVICE} • {MIC_SR:,} Hz</div>
-        </div>
-        <div class="status-pill {status_class}">
-          <span class="status-dot"></span> {sensor_status}
-        </div>
-      </div>
-    </div>
-    """, unsafe_allow_html=True)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_audio:
+            temp_audio.write(audio_bytes)
+            temp_audio_path = temp_audio.name
 
-# ============================================================
-# LIVE DASHBOARD FRAGMENT
-# ============================================================
-if mic_running:
+        with st.spinner("Analyzing your voice..."):
 
-    @st.fragment(run_every=0.5)
-    def live_dashboard():
-        global latest_result, latest_confidence, latest_mel, last_prediction
+            audio, sr = librosa.load(
+                temp_audio_path,
+                sr=44100,
+                mono=True
+            )
 
-        with audio_lock:
-            current_audio = audio_buffer.copy()
-            rms = latest_rms
+            result, confidence, mel = predict_audio(audio, sr)
 
-        now = time.time()
+        if result == "FAKE":
+            st.markdown(
+                f"""
+                <div style="
+                    background-color: var(--danger-bg);
+                    border: 1px solid var(--danger-border);
+                    color: var(--danger-text);
+                    padding: 14px 18px;
+                    border-radius: var(--radius-md);
+                    font-weight: 500;
+                    margin: 16px 0;
+                ">
+                    <strong>🚨 SYNTHETIC VOICE CLONE DETECTED</strong><br>
+                    Confidence Score:
+                    <strong>{confidence:.2f}%</strong>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
 
-        # Run inference every 2.0 seconds when audio passes noise floor
-        if (
-            len(current_audio) >= MIC_SR * 2
-            and rms > 0.001
-            and now - last_prediction >= 2
-        ):
-            try:
-                result, confidence, mel = predict_audio(current_audio, MIC_SR)
-                latest_result = result
-                latest_confidence = confidence
-                latest_mel = mel
-                last_prediction = now
-            except Exception as e:
-                st.error(f"Inference error encountered: {e}")
+        elif result == "REAL":
+            st.markdown(
+                f"""
+                <div style="
+                    background-color: var(--success-bg);
+                    border: 1px solid var(--success-border);
+                    color: var(--success-text);
+                    padding: 14px 18px;
+                    border-radius: var(--radius-md);
+                    font-weight: 500;
+                    margin: 16px 0;
+                ">
+                    <strong>✅ AUTHENTIC HUMAN SPEECH VERIFIED</strong><br>
+                    Confidence Score:
+                    <strong>{confidence:.2f}%</strong>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
 
-        # Signal Activity Status Banner
-        if rms > 0.01:
-            st.markdown("""
-            <div style="background-color: var(--success-bg); border: 1px solid var(--success-border); color: var(--success-text); padding: 8px 14px; border-radius: var(--radius-sm); font-size: 13px; font-weight: 500; margin: 12px 0;">
-              🔊 <strong>Strong Vocal Activity Detected</strong> — Processing audio buffers into Mel spectrogram...
-            </div>
-            """, unsafe_allow_html=True)
-        elif rms > 0.001:
-            st.markdown("""
-            <div style="background-color: var(--accent-light); border: 1px solid #BFDBFE; color: var(--accent-primary); padding: 8px 14px; border-radius: var(--radius-sm); font-size: 13px; font-weight: 500; margin: 12px 0;">
-              🎙️ <strong>Ambient Audio Signal Detected</strong> — Awaiting clear vocal articulation.
-            </div>
-            """, unsafe_allow_html=True)
-        else:
-            st.markdown("""
-            <div style="background-color: var(--neutral-bg); border: 1px solid var(--neutral-border); color: var(--neutral-text); padding: 8px 14px; border-radius: var(--radius-sm); font-size: 13px; font-weight: 500; margin: 12px 0;">
-              🔇 <strong>Awaiting Voice Input</strong> — Background noise floor level normal.
-            </div>
-            """, unsafe_allow_html=True)
-
-        # 4 Metric Cards (8px Grid Spacing)
-        c1, c2, c3, c4 = st.columns(4)
-
-        with c1:
-            st.markdown(f"""
-            <div class="ui-card">
-              <div class="ui-card-title">RMS Signal Intensity</div>
-              <div class="ui-card-value">{rms:.4f}</div>
-              <div class="ui-card-subtext">Noise floor: > 0.0010</div>
-            </div>
-            """, unsafe_allow_html=True)
-
-        with c2:
-            if latest_result == "REAL":
-                badge_html = '<span class="badge badge-real">● AUTHENTIC</span>'
-                desc = "Human vocal characteristics verified"
-            elif latest_result == "FAKE":
-                badge_html = '<span class="badge badge-fake">● SYNTHETIC</span>'
-                desc = "Cloning artifacts identified"
-            else:
-                badge_html = '<span class="badge badge-pending">● ANALYZING</span>'
-                desc = "Collecting audio frames..."
-
-            st.markdown(f"""
-            <div class="ui-card">
-              <div class="ui-card-title">Classification Verdict</div>
-              <div style="margin-top: 4px; margin-bottom: 6px;">{badge_html}</div>
-              <div class="ui-card-subtext">{desc}</div>
-            </div>
-            """, unsafe_allow_html=True)
-
-        with c3:
-            conf_display = f"{latest_confidence:.1f}%" if latest_result != "WAITING" else "—"
-            st.markdown(f"""
-            <div class="ui-card">
-              <div class="ui-card-title">Model Confidence</div>
-              <div class="ui-card-value">{conf_display}</div>
-              <div class="ui-card-subtext">CNN Sigmoid probability</div>
-            </div>
-            """, unsafe_allow_html=True)
-
-        with c4:
-            if latest_result == "FAKE":
-                threat_badge = '<span class="badge badge-fake">HIGH RISK</span>'
-                threat_desc = "Synthetic voice clone signature"
-            elif latest_result == "REAL":
-                threat_badge = '<span class="badge badge-real">LOW RISK</span>'
-                threat_desc = "No anomalies detected"
-            else:
-                threat_badge = '<span class="badge badge-pending">PENDING</span>'
-                threat_desc = "Calibrating baseline"
-
-            st.markdown(f"""
-            <div class="ui-card">
-              <div class="ui-card-title">Threat Assessment</div>
-              <div style="margin-top: 4px; margin-bottom: 6px;">{threat_badge}</div>
-              <div class="ui-card-subtext">{threat_desc}</div>
-            </div>
-            """, unsafe_allow_html=True)
-
-        # ---------------- WAVEFORM PLOT ----------------
-        st.markdown("<div style='height: 16px;'></div>", unsafe_allow_html=True)
-        st.markdown("### 📈 Live Signal Waveform")
+        # Waveform
+        st.markdown("### 📈 Live Voice Waveform")
 
         fig_wave, ax_wave = plt.subplots(figsize=(14, 3.2))
-        t = np.arange(len(current_audio)) / MIC_SR
-        ax_wave.plot(t, current_audio, color="#2563EB", linewidth=1.2)
-        ax_wave.set_xlim(0, 5)
-        ax_wave.set_ylim(-1, 1)
+
+        t = np.arange(len(audio)) / sr
+
+        ax_wave.plot(
+            t,
+            audio,
+            color="#2563EB",
+            linewidth=1.1
+        )
 
         apply_plot_theme(
-            fig_wave, ax_wave,
-            title="ACOUSTIC SIGNAL AMPLITUDE (5-SECOND ROLLING WINDOW)",
+            fig_wave,
+            ax_wave,
+            title="RECORDED VOICE SIGNAL",
             xlabel="Time (seconds)",
             ylabel="Normalized Amplitude"
         )
 
         fig_wave.tight_layout()
-        st.pyplot(fig_wave, clear_figure=True)
+
+        st.pyplot(
+            fig_wave,
+            clear_figure=True
+        )
+
         plt.close(fig_wave)
 
-        # ---------------- MEL-SPECTROGRAM PLOT ----------------
-        st.markdown("### 🔥 Mel-Frequency Spectrogram")
+        # Mel Spectrogram
+        if mel is not None:
 
-        if latest_mel is not None:
-            fig_mel, ax_mel = plt.subplots(figsize=(14, 3.8))
+            st.markdown("### 🔥 Mel-Frequency Spectrogram")
+
+            fig_mel, ax_mel = plt.subplots(
+                figsize=(14, 3.8)
+            )
+
             image = librosa.display.specshow(
-                latest_mel,
+                mel,
                 sr=16000,
                 x_axis="time",
                 y_axis="mel",
@@ -1010,39 +862,35 @@ if mic_running:
                 cmap="Blues",
                 ax=ax_mel
             )
+
             apply_plot_theme(
-                fig_mel, ax_mel,
-                title="MEL-SPECTROGRAM FEATURE REPRESENTATION (128 BANDS × 200 FRAMES)",
+                fig_mel,
+                ax_mel,
+                title="MEL-SPECTROGRAM FEATURE REPRESENTATION",
                 xlabel="Time (seconds)",
                 ylabel="Mel Frequency (Hz)"
             )
-            cbar = fig_mel.colorbar(image, ax=ax_mel, format="%+2.0f dB")
-            cbar.ax.yaxis.set_tick_params(color="#4B5563")
-            cbar.outline.set_edgecolor("#E5E7EB")
-            plt.setp(plt.getp(cbar.ax.axes, 'yticklabels'), color="#4B5563", size=9)
+
+            fig_mel.colorbar(
+                image,
+                ax=ax_mel,
+                format="%+2.0f dB"
+            )
 
             fig_mel.tight_layout()
-            st.pyplot(fig_mel, clear_figure=True)
+
+            st.pyplot(
+                fig_mel,
+                clear_figure=True
+            )
+
             plt.close(fig_mel)
-        else:
-            st.markdown("""
-            <div class="empty-state">
-              <div class="empty-state-icon">📊</div>
-              <div class="empty-state-title">Awaiting Mel Feature Generation</div>
-              <div class="empty-state-desc">Maintain vocal articulation for at least 2 seconds to generate the normalized 128-band Mel spectrogram matrix for CNN inference.</div>
-            </div>
-            """, unsafe_allow_html=True)
 
-    live_dashboard()
+        os.remove(temp_audio_path)
 
-else:
-    st.markdown("""
-    <div class="empty-state">
-      <div class="empty-state-icon">🎙️</div>
-      <div class="empty-state-title">Live Sensor in Standby</div>
-      <div class="empty-state-desc">Click <strong>"Start Live Detection"</strong> above to initialize the audio input stream and begin real-time deep learning verification.</div>
-    </div>
-    """, unsafe_allow_html=True)
+    except Exception as e:
+        st.error(f"Microphone processing error: {e}")
+
 
 # ============================================================
 # ARCHITECTURE PIPELINE
